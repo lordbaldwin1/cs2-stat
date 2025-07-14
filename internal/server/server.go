@@ -15,8 +15,9 @@ import (
 )
 
 type Server struct {
-	port int
-	db   *database.Queries
+	port         int
+	db           *database.Queries
+	faceitApiKey string
 }
 
 func NewServer() *http.Server {
@@ -24,6 +25,10 @@ func NewServer() *http.Server {
 	dbUrl := os.Getenv("DATABASE_URL")
 	if dbUrl == "" {
 		log.Fatal("DATABASE_URL MUST BE SET")
+	}
+	faceitApiKey := os.Getenv("FACEIT_API_KEY")
+	if faceitApiKey == "" {
+		log.Fatal("FACEIT_API_KEY MUST BE SET")
 	}
 
 	dbConn, err := sql.Open("sqlite3", dbUrl)
@@ -33,12 +38,14 @@ func NewServer() *http.Server {
 	db := database.New(dbConn)
 
 	NewServer := &Server{
-		port: port,
-		db:   db,
+		port:         port,
+		db:           db,
+		faceitApiKey: faceitApiKey,
 	}
 	log.Print("connected to db")
 
-	// Declare Server config
+	go NewServer.StartFetchAndScrape()
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", NewServer.port),
 		Handler:      NewServer.RegisterRoutes(),
@@ -46,6 +53,12 @@ func NewServer() *http.Server {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
-
 	return server
+}
+
+func (s *Server) StartFetchAndScrape() {
+	err := s.FetchAndScrape()
+	if err != nil {
+		log.Printf("error: %s", err)
+	}
 }
