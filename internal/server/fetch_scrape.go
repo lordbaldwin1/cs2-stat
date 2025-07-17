@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"cs2-stat/internal/database"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -64,6 +66,19 @@ func (s *Server) FetchAndScrape() error {
 
 	for _, player := range playerDetails {
 		fmt.Printf("steamID: %s, name: %s, country: %s, faceitURL: %s, avatar: %s\n", player.SteamID64, player.Nickname, player.Country, player.FaceitURL, player.Avatar)
+	}
+
+	for _, player := range playerDetails {
+		faceitURL := strings.ReplaceAll(player.FaceitURL, "{lang}", "en")
+		log.Println("Adding player to db: ", player.Nickname)
+		log.Println(faceitURL)
+		s.db.CreatePlayer(ctx, database.CreatePlayerParams{
+			SteamID:   player.SteamID64,
+			Name:      player.Nickname,
+			Country:   player.Country,
+			FaceitUrl: faceitURL,
+			Avatar:    player.Avatar,
+		})
 	}
 
 	return nil

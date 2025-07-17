@@ -8,9 +8,12 @@ import (
 	"time"
 )
 
-type User struct {
-	ID        interface{}
+type Player struct {
+	SteamID   interface{}
+	Name      string
+	Country   string
+	FaceitUrl string
+	Avatar    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	Email     string
 }

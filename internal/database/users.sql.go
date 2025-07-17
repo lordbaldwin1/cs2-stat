@@ -9,25 +9,43 @@ import (
 	"context"
 )
 
-const createUser = `-- name: CreateUser :one
-INSERT INTO users (id, created_at, updated_at, email)
-VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
-RETURNING id, created_at, updated_at, email
+const createPlayer = `-- name: CreatePlayer :one
+INSERT INTO players (steam_id, name, country, faceit_url, avatar, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT(steam_id) DO UPDATE SET
+  name = excluded.name,
+  country = excluded.country,
+  faceit_url = excluded.faceit_url,
+  avatar = excluded.avatar,
+  updated_at = CURRENT_TIMESTAMP
+RETURNING steam_id, name, country, faceit_url, avatar, created_at, updated_at
 `
 
-type CreateUserParams struct {
-	ID    interface{}
-	Email string
+type CreatePlayerParams struct {
+	SteamID   interface{}
+	Name      string
+	Country   string
+	FaceitUrl string
+	Avatar    string
 }
 
-func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, createUser, arg.ID, arg.Email)
-	var i User
+func (q *Queries) CreatePlayer(ctx context.Context, arg CreatePlayerParams) (Player, error) {
+	row := q.db.QueryRowContext(ctx, createPlayer,
+		arg.SteamID,
+		arg.Name,
+		arg.Country,
+		arg.FaceitUrl,
+		arg.Avatar,
+	)
+	var i Player
 	err := row.Scan(
-		&i.ID,
+		&i.SteamID,
+		&i.Name,
+		&i.Country,
+		&i.FaceitUrl,
+		&i.Avatar,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.Email,
 	)
 	return i, err
 }
