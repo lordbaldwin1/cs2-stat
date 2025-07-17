@@ -22,6 +22,9 @@ tmp/
 .vscode
 .idea
 
+# database lol
+*.db
+
 # .env file
 .env
 
