@@ -43,16 +43,20 @@ func (s *Server) FetchAndScrape() error {
 	defer cancel()
 
 	client := &http.Client{}
+
+	// fetch top players on faceit leaderboard
 	playersEU, err := s.getTopPlayers(ctx, client, "EU", 5)
 	if err != nil {
 		return fmt.Errorf("error: failed to get top EU players: %s", err)
 	}
 
-	playerIDs := make([]string, 0, len(playersEU.Items))
+	// take resulting player IDs and extract them into a slice
+	playerIDs := []string{}
 	for _, player := range playersEU.Items {
 		playerIDs = append(playerIDs, player.PlayerID)
 	}
 
+	// get player details (steamID) from faceit
 	playerDetails, err := s.getPlayerDetailsWithWorkers(ctx, client, playerIDs)
 	if err != nil {
 		return fmt.Errorf("error: failed to get player details: %s", err)
@@ -100,7 +104,7 @@ func (s *Server) getPlayerDetailsWithWorkers(ctx context.Context, client *http.C
 	results := make(chan PlayerDetails, len(playerIDs))
 
 	// Start workers
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		go worker(ctx, jobs, results, s, client)
 	}
 
