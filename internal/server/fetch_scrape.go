@@ -96,16 +96,15 @@ func (s *Server) FetchAndScrape() error {
 	}
 
 	// concurrent scraping
-	err = s.scrapeLeetifyWithWorkers(leetifyURLs)
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), chromedp.DefaultExecAllocatorOptions[:]...)
+	defer cancel()
+	scrapeCtx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+	matchLinks, err := s.scrapeMatchLinksWithWorkers(scrapeCtx, leetifyURLs)
 	if err != nil {
 		return err
 	}
-
-	// old scraping
-	// err = s.scrapeLeetify(playerDetails)
-	// if err != nil {
-	// 	return err
-	// }
+	fmt.Println(matchLinks)
 
 	return nil
 }
@@ -162,12 +161,41 @@ func (s *Server) scrapeLeetify(players []PlayerDetails) error {
 	return nil
 }
 
-func (s *Server) scrapeLeetifyWithWorkers(playerURLs []string) error {
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), chromedp.DefaultExecAllocatorOptions[:]...)
-	defer cancel()
-	parentCtx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
+func (s *Server) scrapeMatchesWithWorkers(parentCtx context.Context, matchLinks []string) error {
+	numWorkers := 5
+	jobs := make(chan string, len(matchLinks))
+	results := make(chan [][]string, len(matchLinks))
 
+	var wg sync.WaitGroup
+	for range numWorkers {
+		wg.Add(1)
+		go func() {
+			matchesWorker(parentCtx, jobs, results)
+		}()
+	}
+
+	for _, matchLink := range matchLinks {
+		jobs <- matchLink
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var tableData [][]string
+	for rows := range results {
+		tableData = append(tableData, rows...)
+	}
+	return nil
+}
+
+func matchesWorker(ctx context.Context, jobs <-chan string, results chan<- [][]string) {
+
+}
+
+func (s *Server) scrapeMatchLinksWithWorkers(parentCtx context.Context, playerURLs []string) ([]string, error) {
 	numWorkers := 5
 	jobs := make(chan string, len(playerURLs))
 	results := make(chan []string, len(playerURLs))
@@ -196,11 +224,7 @@ func (s *Server) scrapeLeetifyWithWorkers(playerURLs []string) error {
 		matchLinks = append(matchLinks, link...)
 	}
 
-	for _, link := range matchLinks {
-		log.Println(link)
-	}
-	// figure out wtf to return
-	return nil
+	return matchLinks, nil
 }
 
 func matchLinkWorker(ctx context.Context, jobs <-chan string, results chan<- []string) {
