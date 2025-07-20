@@ -17,6 +17,7 @@ import (
 type Server struct {
 	port         int
 	db           *database.Queries
+	dbConn       *sql.DB
 	faceitApiKey string
 }
 
@@ -40,6 +41,7 @@ func NewServer() *http.Server {
 	NewServer := &Server{
 		port:         port,
 		db:           db,
+		dbConn:       dbConn,
 		faceitApiKey: faceitApiKey,
 	}
 	log.Print("connected to db")

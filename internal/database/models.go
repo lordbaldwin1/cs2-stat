@@ -8,6 +8,24 @@ import (
 	"time"
 )
 
+type Match struct {
+	MatchUrl                string
+	WAvgLeetifyRating       float64
+	WAvgPersonalPerformance float64
+	WAvgHltvRating          float64
+	WAvgKd                  float64
+	WAvgAim                 float64
+	WAvgUtility             float64
+	LAvgLeetifyRating       float64
+	LAvgPersonalPerformance float64
+	LAvgHltvRating          float64
+	LAvgKd                  float64
+	LAvgAim                 float64
+	LAvgUtility             float64
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+}
+
 type Player struct {
 	SteamID   interface{}
 	Name      string
