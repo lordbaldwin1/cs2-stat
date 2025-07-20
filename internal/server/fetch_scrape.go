@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +55,30 @@ type Team struct {
 }
 
 type Match struct {
-	Teams [2]Team // [0]: winner, [1]: loser
+	Teams    [2]Team // [0]: winner, [1]: loser
+	MatchURL string
+}
+
+type MatchAverageStats struct {
+	MatchURL                   string
+	WinAvgLeetifyRating        float64
+	WinAvgPersonalPerformance  float64
+	WinAvgHTLVRating           float64
+	WinAvgKD                   float64
+	WinAvgAim                  float64
+	WinAvgUtility              float64
+	LossAvgLeetifyRating       float64
+	LossAvgPersonalPerformance float64
+	LossAvgHTLVRating          float64
+	LossAvgKD                  float64
+	LossAvgAim                 float64
+	LossAvgUtility             float64
+}
+
+// ScrapedMatchData represents the raw data scraped from a match page
+type ScrapedMatchData struct {
+	Data [][]string
+	URL  string
 }
 
 const topPlayersURL string = "https://open.faceit.com/data/v4/rankings/games/cs2/regions/"
@@ -87,15 +111,11 @@ func (s *Server) FetchAndScrape() error {
 	if err != nil {
 		return fmt.Errorf("error: failed to get player details: %s", err)
 	}
+	printPlayerDetails(playerDetails)
 
-	for _, player := range playerDetails {
-		fmt.Printf("steamID: %s, name: %s, country: %s, faceitURL: %s, avatar: %s\n", player.SteamID64, player.Nickname, player.Country, player.FaceitURL, player.Avatar)
-	}
-
+	printDatabaseOperations(playerDetails)
 	for _, player := range playerDetails {
 		faceitURL := strings.ReplaceAll(player.FaceitURL, "{lang}", "en")
-		log.Println("Adding player to db: ", player.Nickname)
-		log.Println(faceitURL)
 		addedPlayer, err := s.db.CreatePlayer(ctx, database.CreatePlayerParams{
 			SteamID:   player.SteamID64,
 			Name:      player.Nickname,
@@ -109,45 +129,41 @@ func (s *Server) FetchAndScrape() error {
 		log.Printf("Added player: %s to db\n", addedPlayer.Name)
 	}
 
+	// Prepare Leetify URLs for scraping
 	var leetifyURLs []string
 	for _, playerDetail := range playerDetails {
 		url := leetifyUserURL + playerDetail.SteamID64
 		leetifyURLs = append(leetifyURLs, url)
 	}
 
+	// create chromedp context to share between scraping functions
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), chromedp.DefaultExecAllocatorOptions[:]...)
 	defer cancel()
 	scrapeCtx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	// concurrent scraping of match URLs
-	// NOTE: Fix error handling, currently returns no errors
+	// Scrape match links from player profiles
 	log.Println("Starting to scrape user profiles for matches...")
 	matchLinks, err := s.scrapeMatchLinksWithWorkers(scrapeCtx, leetifyURLs)
 	if err != nil {
 		return err
 	}
-	fmt.Println("Matches found:", len(matchLinks))
+	fmt.Printf("Matches found: %d\n", len(matchLinks))
 
-	// concurrent scraping of match tables from URLs
-	// NOTE: Fix error handling, currently returns no errors
+	// Scrape match statistics
 	log.Println("Starting to scrape matches for stats...")
 	matches, err := s.scrapeMatchesWithWorkers(scrapeCtx, matchLinks)
 	if err != nil {
 		return err
 	}
 
-	for _, match := range matches {
-		fmt.Println()
-		fmt.Println("Matches: ")
-		fmt.Println("Winning team:")
-		fmt.Println(match.Teams[0])
-		fmt.Println()
-		fmt.Println("Losing team:")
-		fmt.Println(match.Teams[1])
-		fmt.Println()
-
+	// Calculate and print average match statistics
+	avgMatchStats, err := getAverageMatchStats(matches)
+	if err != nil {
+		return fmt.Errorf("error calculating average match stats: %s", err)
 	}
+
+	printAverageMatchStats(avgMatchStats)
 
 	return nil
 }
@@ -155,7 +171,7 @@ func (s *Server) FetchAndScrape() error {
 func (s *Server) scrapeMatchesWithWorkers(parentCtx context.Context, matchLinks []string) ([]Match, error) {
 	numWorkers := 5
 	jobs := make(chan string, len(matchLinks))
-	results := make(chan [][]string, len(matchLinks)*10)
+	results := make(chan ScrapedMatchData, len(matchLinks)*10)
 
 	var wg sync.WaitGroup
 	for range numWorkers {
@@ -176,46 +192,45 @@ func (s *Server) scrapeMatchesWithWorkers(parentCtx context.Context, matchLinks 
 		close(results)
 	}()
 
-	var allMatches [][][]string
-	for matchRows := range results {
-		allMatches = append(allMatches, matchRows)
+	// array of all matches with their URLs
+	// matches are an array of players with their corresponding URL
+	var allMatches []ScrapedMatchData
+	for result := range results {
+		allMatches = append(allMatches, result)
 	}
 
 	var matches []Match
-	for _, matchRow := range allMatches {
-		var nonEmptyRows [][]string
-		for _, row := range matchRow {
-			if len(row) == 0 {
+	for _, match := range allMatches {
+		// leetify scrape returns some empty arrays
+		var validMatches [][]string
+		for _, player := range match.Data {
+			if len(player) == 0 {
 				continue
 			}
-			nonEmptyRows = append(nonEmptyRows, row)
+			validMatches = append(validMatches, player)
 		}
 
-		if len(nonEmptyRows) < 10 {
+		if len(validMatches) < 10 {
 			continue
 		}
 
 		var winPlayers, losePlayers []PlayerStats
-		for i, row := range nonEmptyRows[:10] {
+		for i, player := range validMatches[:10] {
 			p := PlayerStats{
-				Name:                row[0],
-				LeetifyRating:       row[1],
-				PersonalPerformance: row[2],
-				HLTVRating:          row[3],
-				KD:                  row[4],
-				ADR:                 row[5],
-				Aim:                 row[6],
-				Utility:             row[7],
+				Name:                player[0],
+				LeetifyRating:       player[1],
+				PersonalPerformance: player[2],
+				HLTVRating:          player[3],
+				KD:                  player[4],
+				ADR:                 player[5],
+				Aim:                 player[6],
+				Utility:             player[7],
 			}
 			if i < 5 {
 				winPlayers = append(winPlayers, p)
 			} else {
 				losePlayers = append(losePlayers, p)
 			}
-		}
-		if len(winPlayers) < 5 || len(losePlayers) < 5 {
-			log.Println("Team had less than 5 players")
-			continue
 		}
 		winTeam := Team{
 			Players: winPlayers,
@@ -225,15 +240,16 @@ func (s *Server) scrapeMatchesWithWorkers(parentCtx context.Context, matchLinks 
 			Players: losePlayers,
 			Won:     false,
 		}
-		match := Match{
-			Teams: [2]Team{winTeam, loseTeam},
+		matchObj := Match{
+			Teams:    [2]Team{winTeam, loseTeam},
+			MatchURL: match.URL,
 		}
-		matches = append(matches, match)
+		matches = append(matches, matchObj)
 	}
 	return matches, nil
 }
 
-func matchesWorker(ctx context.Context, jobs <-chan string, results chan<- [][]string) {
+func matchesWorker(ctx context.Context, jobs <-chan string, results chan<- ScrapedMatchData) {
 	for matchLink := range jobs {
 		tabCtx, cancel := chromedp.NewContext(ctx)
 		var matchData [][]string
@@ -252,7 +268,10 @@ func matchesWorker(ctx context.Context, jobs <-chan string, results chan<- [][]s
 			log.Println("Error: ", err)
 			continue
 		}
-		results <- matchData
+		results <- ScrapedMatchData{
+			Data: matchData,
+			URL:  matchLink,
+		}
 	}
 }
 
@@ -420,4 +439,201 @@ func getTopPlayersURL(region string, limit int) string {
 
 func getPlayerDetailsURL(playerID string) string {
 	return fmt.Sprintf("%s%s", playerDetailsURL, playerID)
+}
+
+func getAverageMatchStats(matches []Match) ([]MatchAverageStats, error) {
+	var matchesAverageStats []MatchAverageStats
+	const teamSize float64 = 5.0
+	for _, match := range matches {
+		var (
+			winLeetify, winPersonalPerformance, winHLTV, winKD, winAim, winUtility       float64
+			lossLeetify, lossPersonalPerformance, lossHLTV, lossKD, lossAim, lossUtility float64
+			skipMatch                                                                    bool
+		)
+
+		for _, player := range match.Teams[0].Players {
+			lr, err := strconv.ParseFloat(player.LeetifyRating, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			winLeetify += lr
+
+			pp, err := strconv.ParseFloat(player.PersonalPerformance, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			winPersonalPerformance += pp
+
+			hr, err := strconv.ParseFloat(player.HLTVRating, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			winHLTV += hr
+
+			kdr, err := strconv.ParseFloat(player.KD, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			winKD += kdr
+
+			aim, err := strconv.ParseFloat(player.Aim, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			winAim += aim
+
+			util, err := strconv.ParseFloat(player.Utility, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			winUtility += util
+		}
+		if skipMatch {
+			continue
+		}
+
+		for _, player := range match.Teams[1].Players {
+			lr, err := strconv.ParseFloat(player.LeetifyRating, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			lossLeetify += lr
+
+			pp, err := strconv.ParseFloat(player.PersonalPerformance, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			lossPersonalPerformance += pp
+
+			hr, err := strconv.ParseFloat(player.HLTVRating, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			lossHLTV += hr
+
+			kdr, err := strconv.ParseFloat(player.KD, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			lossKD += kdr
+
+			aim, err := strconv.ParseFloat(player.Aim, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			lossAim += aim
+
+			util, err := strconv.ParseFloat(player.Utility, 64)
+			if err != nil {
+				skipMatch = true
+				break
+			}
+			lossUtility += util
+		}
+		if skipMatch {
+			continue
+		}
+		matchesAverageStats = append(matchesAverageStats, MatchAverageStats{
+			MatchURL:                   match.MatchURL,
+			WinAvgLeetifyRating:        winLeetify / teamSize,
+			WinAvgPersonalPerformance:  winPersonalPerformance / teamSize,
+			WinAvgHTLVRating:           winHLTV / teamSize,
+			WinAvgKD:                   winKD / teamSize,
+			WinAvgAim:                  winAim / teamSize,
+			WinAvgUtility:              winUtility / teamSize,
+			LossAvgLeetifyRating:       lossLeetify / teamSize,
+			LossAvgPersonalPerformance: lossPersonalPerformance / teamSize,
+			LossAvgHTLVRating:          lossHLTV / teamSize,
+			LossAvgKD:                  lossKD / teamSize,
+			LossAvgAim:                 lossAim / teamSize,
+			LossAvgUtility:             lossUtility / teamSize,
+		})
+	}
+	return matchesAverageStats, nil
+}
+
+// =============================================================================
+// PRINT FUNCTIONS
+// =============================================================================
+
+// printPlayerDetails prints detailed information about fetched players
+func printPlayerDetails(players []PlayerDetails) {
+	fmt.Println("\n=== FETCHED PLAYER DETAILS ===")
+	for _, player := range players {
+		fmt.Printf("  Name: %s\n", player.Nickname)
+		fmt.Printf("  Steam ID: %s\n", player.SteamID64)
+		fmt.Printf("  Country: %s\n", player.Country)
+		fmt.Printf("  Faceit URL: %s\n", player.FaceitURL)
+		fmt.Printf("  Avatar: %s\n", player.Avatar)
+		fmt.Println("  " + strings.Repeat("-", 30))
+	}
+	fmt.Printf("Total players fetched: %d\n", len(players))
+}
+
+// printDatabaseOperations prints information about database operations
+func printDatabaseOperations(players []PlayerDetails) {
+	fmt.Println("\n=== DATABASE OPERATIONS ===")
+	for _, player := range players {
+		faceitURL := strings.ReplaceAll(player.FaceitURL, "{lang}", "en")
+		fmt.Printf("  Adding player: %s\n", player.Nickname)
+		fmt.Printf("  Faceit URL: %s\n", faceitURL)
+	}
+}
+
+// printMatchDetails prints detailed information about scraped matches
+func printMatchDetails(matches []Match) {
+	fmt.Println("\n=== SCRAPED MATCH DETAILS ===")
+	for i, match := range matches {
+		fmt.Printf("\nMatch %d:\n", i+1)
+		fmt.Printf("  URL: %s\n", match.MatchURL)
+		fmt.Println("  Winning Team:")
+		for j, player := range match.Teams[0].Players {
+			fmt.Printf("    Player %d: %s | Rating: %s | Perf: %s | HLTV: %s | K/D: %s | ADR: %s | Aim: %s | Util: %s\n",
+				j+1, player.Name, player.LeetifyRating, player.PersonalPerformance, player.HLTVRating, player.KD, player.ADR, player.Aim, player.Utility)
+		}
+		fmt.Println("  Losing Team:")
+		for j, player := range match.Teams[1].Players {
+			fmt.Printf("    Player %d: %s | Rating: %s | Perf: %s | HLTV: %s | K/D: %s | ADR: %s | Aim: %s | Util: %s\n",
+				j+1, player.Name, player.LeetifyRating, player.PersonalPerformance, player.HLTVRating, player.KD, player.ADR, player.Aim, player.Utility)
+		}
+		fmt.Println("  " + strings.Repeat("-", 40))
+	}
+	fmt.Printf("Total matches scraped: %d\n", len(matches))
+}
+
+// printAverageMatchStats prints the calculated average statistics for all matches
+func printAverageMatchStats(stats []MatchAverageStats) {
+	fmt.Println("\n=== AVERAGE MATCH STATISTICS ===")
+	for i, stat := range stats {
+		fmt.Printf("\nMatch %d:\n", i+1)
+		fmt.Printf("  URL: %s\n", stat.MatchURL)
+		fmt.Printf("  WINNING TEAM Averages:\n")
+		fmt.Printf("    Leetify Rating: %.2f\n", stat.WinAvgLeetifyRating)
+		fmt.Printf("    Personal Performance: %.2f\n", stat.WinAvgPersonalPerformance)
+		fmt.Printf("    HLTV Rating: %.2f\n", stat.WinAvgHTLVRating)
+		fmt.Printf("    K/D Ratio: %.2f\n", stat.WinAvgKD)
+		fmt.Printf("    Aim: %.2f\n", stat.WinAvgAim)
+		fmt.Printf("    Utility: %.2f\n", stat.WinAvgUtility)
+
+		fmt.Printf("  LOSING TEAM Averages:\n")
+		fmt.Printf("    Leetify Rating: %.2f\n", stat.LossAvgLeetifyRating)
+		fmt.Printf("    Personal Performance: %.2f\n", stat.LossAvgPersonalPerformance)
+		fmt.Printf("    HLTV Rating: %.2f\n", stat.LossAvgHTLVRating)
+		fmt.Printf("    K/D Ratio: %.2f\n", stat.LossAvgKD)
+		fmt.Printf("    Aim: %.2f\n", stat.LossAvgAim)
+		fmt.Printf("    Utility: %.2f\n", stat.LossAvgUtility)
+		fmt.Println("  " + strings.Repeat("-", 40))
+	}
+	fmt.Printf("\nTotal matches analyzed: %d\n", len(stats))
 }
