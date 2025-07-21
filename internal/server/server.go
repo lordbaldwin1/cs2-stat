@@ -59,7 +59,7 @@ func NewServer() *http.Server {
 }
 
 func (s *Server) StartFetchAndScrape() {
-	err := s.FetchAndScrape()
+	err := s.FetchAndScrapeJob()
 	if err != nil {
 		log.Printf("error: %s", err)
 	}

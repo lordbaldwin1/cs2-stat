@@ -74,16 +74,41 @@ func (s *Server) scrapeMatchesWithWorkers(parentCtx context.Context, matchLinks 
 	}
 	close(jobs)
 
+	done := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(results)
+		close(done)
 	}()
+
+	select {
+	case <-done:
+		close(results)
+	case <-time.After(15 * time.Minute):
+		log.Println("Workers taking too f***ing long, closing results")
+		close(results)
+	}
 
 	// array of all matches with their URLs
 	// matches are an array of players with their corresponding URL
 	var allMatches []ScrapedMatchData
-	for result := range results {
-		allMatches = append(allMatches, result)
+	timeout := time.After(10 * time.Minute)
+
+resultsLoop:
+	for {
+		select {
+		case match, ok := <-results:
+			if !ok {
+				log.Println("Results channel close, breaking")
+				break resultsLoop
+			}
+			allMatches = append(allMatches, match)
+		case <-timeout:
+			log.Println("Results channel closed, breaking")
+			break resultsLoop
+		case <-parentCtx.Done():
+			log.Println("Parent context cancelled, breaking")
+			break resultsLoop
+		}
 	}
 
 	var matches []Match
@@ -141,32 +166,41 @@ func (s *Server) scrapeMatchesWithWorkers(parentCtx context.Context, matchLinks 
 
 func matchesWorker(ctx context.Context, jobs <-chan string, results chan<- ScrapedMatchData) {
 	for matchLink := range jobs {
-		tabCtx, cancel := chromedp.NewContext(ctx)
-		var matchResult string
-		var matchData [][]string
-		err := chromedp.Run(tabCtx,
-			chromedp.Navigate(matchLink),
-			chromedp.WaitVisible(`table`, chromedp.ByQuery),
-			chromedp.Sleep(1*time.Second),
-			chromedp.Text(`div.phrase`, &matchResult, chromedp.NodeVisible, chromedp.ByQuery),
-			chromedp.Evaluate(`
-				Array.from(document.querySelectorAll('table tbody tr'))
-					.map(row => Array.from(row.querySelectorAll('td'))
-					.map(cell => cell.textContent.trim()))
-			`, &matchData),
-		)
-		cancel()
-		if err != nil {
-			log.Println("Error: ", err)
-			continue
-		}
-		if matchResult == "TIE" {
-			log.Println("Tie detected, skipping...")
-			continue
-		}
-		results <- ScrapedMatchData{
-			Data: matchData,
-			URL:  matchLink,
+		select {
+		case <-ctx.Done():
+			log.Println("Context cancelled, stopping matches worker")
+			return
+		default:
+			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 45*time.Second)
+			tabCtx, cancel := chromedp.NewContext(timeoutCtx)
+
+			var matchResult string
+			var matchData [][]string
+			err := chromedp.Run(tabCtx,
+				chromedp.Navigate(matchLink),
+				chromedp.WaitVisible(`table`, chromedp.ByQuery),
+				chromedp.Sleep(1*time.Second),
+				chromedp.Text(`div.phrase`, &matchResult, chromedp.NodeVisible, chromedp.ByQuery),
+				chromedp.Evaluate(`
+					Array.from(document.querySelectorAll('table tbody tr'))
+						.map(row => Array.from(row.querySelectorAll('td'))
+						.map(cell => cell.textContent.trim()))
+				`, &matchData),
+			)
+			cancel()
+			timeoutCancel()
+			if err != nil {
+				log.Println("Error: ", err)
+				continue
+			}
+			if matchResult == "TIE" {
+				log.Println("Tie detected, skipping...")
+				continue
+			}
+			results <- ScrapedMatchData{
+				Data: matchData,
+				URL:  matchLink,
+			}
 		}
 	}
 }
@@ -190,14 +224,38 @@ func (s *Server) scrapeMatchLinksWithWorkers(parentCtx context.Context, playerUR
 	}
 	close(jobs)
 
+	done := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(results)
+		close(done)
 	}()
 
+	select {
+	case <-done:
+		close(results)
+	case <-time.After(15 * time.Minute):
+		log.Println("Workers taking too long, closing results")
+		close(results)
+	}
+
 	var matchLinks []string
-	for link := range results {
-		matchLinks = append(matchLinks, link...)
+	timeout := time.After(10 * time.Minute)
+resultsLoop:
+	for {
+		select {
+		case links, ok := <-results:
+			if !ok {
+				log.Println("Results channel closed, breaking out of reading from channel")
+				break resultsLoop
+			}
+			matchLinks = append(matchLinks, links...)
+		case <-timeout:
+			log.Printf("Timeout reached while processing results, breaking out of reading from channel")
+			break resultsLoop
+		case <-parentCtx.Done():
+			log.Printf("Parent context cancelled, breaking out of reading from channel")
+			break resultsLoop
+		}
 	}
 
 	// only append unique matches
@@ -215,25 +273,34 @@ func (s *Server) scrapeMatchLinksWithWorkers(parentCtx context.Context, playerUR
 
 func matchLinkWorker(ctx context.Context, jobs <-chan string, results chan<- []string) {
 	for matchURL := range jobs {
-		tabCtx, cancel := chromedp.NewContext(ctx)
+		select {
+		case <-ctx.Done():
+			log.Println("Context cancelled, stopping matchLink worker")
+			return
+		default:
+			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 30*time.Second)
+			tabCtx, cancel := chromedp.NewContext(timeoutCtx)
 
-		var links []string
-		err := chromedp.Run(tabCtx,
-			chromedp.Navigate(matchURL),
-			chromedp.WaitVisible(`table`, chromedp.ByQuery),
-			chromedp.Evaluate(`
+			var links []string
+			err := chromedp.Run(tabCtx,
+				chromedp.Navigate(matchURL),
+				chromedp.WaitVisible(`table`, chromedp.ByQuery),
+				chromedp.Evaluate(`
 				Array.from(document.querySelectorAll('a.ng-star-inserted[href^="/app/match-details/"]'))
 					.slice(0, 5)
 					.map(a => a.href)
 			`, &links),
-		)
-		cancel()
-		if err != nil {
-			log.Println("Error: ", err)
-			continue
-		}
+			)
+			timeoutCancel()
+			cancel()
+			if err != nil {
+				log.Println("Error: ", err)
+				results <- []string{}
+				continue
+			}
 
-		results <- links
+			results <- links
+		}
 	}
 }
 

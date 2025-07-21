@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -39,6 +40,12 @@ func gracefulShutdown(apiServer *http.Server, done chan bool) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// Clean up Chrome processes
+	log.Println("Cleaning up Chrome processes...")
+	exec.Command("pkill", "-f", "chrome").Run()
+	exec.Command("pkill", "-f", "chromium").Run()
+
 	if err := apiServer.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown with error: %v", err)
 	}

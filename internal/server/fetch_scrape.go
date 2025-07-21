@@ -13,9 +13,78 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-func (s *Server) FetchAndScrape() error {
-	log.Println("Starting fetching and scraping...")
+func (s *Server) FetchAndScrapeJob() error {
+	leaderboardStart := 0
+	leaderboardEnd := 2000
+	offset := 50
+	fetchLimit := 50
 
+	log.Println("Starting fetching and scraping...")
+	log.Println()
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(),
+		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.Flag("headless", true),
+			chromedp.Flag("disable-gpu", true),
+			chromedp.Flag("no-sandbox", true),
+			chromedp.Flag("disable-dev-shm-usage", true),
+			chromedp.Flag("disable-web-security", true),
+			chromedp.Flag("disable-features", "VizDisplayCompositor"),
+			chromedp.Flag("disable-background-timer-throttling", true),
+			chromedp.Flag("disable-backgrounding-occluded-windows", true),
+			chromedp.Flag("disable-renderer-backgrounding", true),
+			chromedp.Flag("disable-ipc-flooding-protection", true),
+		)...,
+	)
+	defer allocCancel()
+
+	scrapeCtx, scrapeCancel := chromedp.NewContext(
+		allocCtx,
+		chromedp.WithLogf(log.Printf),
+	)
+	defer scrapeCancel()
+
+	heartbeatCtx, heartbeatCancel := context.WithCancel(scrapeCtx)
+	defer heartbeatCancel()
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				var version string
+				if err := chromedp.Run(heartbeatCtx, chromedp.Evaluate(`navigator.userAgent`, &version)); err != nil {
+					log.Printf("Heartbeat failed: %v", err)
+				}
+			}
+		}
+	}()
+
+	for startPos := leaderboardStart; startPos < leaderboardEnd; startPos += offset {
+		log.Printf("Scraping leaderboard position: %d to %d...", startPos+1, startPos+offset)
+
+		if startPos > leaderboardStart {
+			time.Sleep(2 * time.Second)
+		}
+
+		err := s.FetchAndScrape(startPos, fetchLimit, scrapeCtx)
+		if err != nil {
+			log.Printf("Error in iteration %d-%d: %v", startPos+1, startPos+offset, err)
+			continue
+		}
+
+		log.Printf("Successfully completed iteration %d-%d", startPos+1, startPos+offset)
+	}
+
+	log.Println("Fetching and scraping finished.")
+	return nil
+}
+
+func (s *Server) FetchAndScrape(startPos int, faceitLimit int, scrapeCtx context.Context) error {
 	parentCtx := context.Background()
 	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Minute)
 	defer cancel()
@@ -23,27 +92,22 @@ func (s *Server) FetchAndScrape() error {
 	client := &http.Client{}
 
 	// fetch top players on faceit leaderboard
-	playersEU, err := s.getTopPlayers(ctx, client, "EU", 5)
+	playersEU, err := s.getTopPlayers(ctx, client, "EU", faceitLimit, startPos)
 	if err != nil {
 		return fmt.Errorf("error: failed to get top EU players: %s", err)
 	}
-
-	log.Println("Player fetch start", playersEU.Start)
-	log.Println("Player fetch end", playersEU.End)
 
 	// take resulting player IDs and extract them into a slice
 	playerIDs := []string{}
 	for _, player := range playersEU.Items {
 		playerIDs = append(playerIDs, player.PlayerID)
 	}
-	log.Println("Players gathered from faceit:", len(playerIDs))
 
 	// get player details (steamID) from faceit
 	playerDetails, err := s.getPlayerDetailsWithWorkers(ctx, client, playerIDs)
 	if err != nil {
 		return fmt.Errorf("error: failed to get player details: %s", err)
 	}
-	log.Println("Player details gathered from faceit:", len(playerDetails))
 
 	for _, player := range playerDetails {
 		faceitURL := strings.ReplaceAll(player.FaceitURL, "{lang}", "en")
@@ -65,31 +129,22 @@ func (s *Server) FetchAndScrape() error {
 		leetifyURLs = append(leetifyURLs, url)
 	}
 
-	// create chromedp context to share between scraping functions
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), chromedp.DefaultExecAllocatorOptions[:]...)
-	defer cancel()
-	scrapeCtx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	log.Println("Starting to scrape user profiles for matches...")
+	log.Println("Scraping user profiles for matches...")
 	matchLinks, err := s.scrapeMatchLinksWithWorkers(scrapeCtx, leetifyURLs)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Match links found: %d\n", len(matchLinks))
 
-	log.Println("Starting to scrape matches for stats...")
+	log.Println("Scraping matches for stats...")
 	matches, err := s.scrapeMatchesWithWorkers(scrapeCtx, matchLinks)
 	if err != nil {
 		return err
 	}
-	log.Println("Matches scraped:", len(matches))
 
 	avgMatchStats, err := getAverageMatchStats(matches)
 	if err != nil {
 		return fmt.Errorf("error calculating average match stats: %s", err)
 	}
-	log.Println("Matches analyzed:", len(avgMatchStats))
 
 	var matchesToInsert []database.CreateMatchParams
 	for _, match := range avgMatchStats {
@@ -112,7 +167,7 @@ func (s *Server) FetchAndScrape() error {
 	if err = BatchInsertMatches(context.Background(), s.dbConn, matchesToInsert); err != nil {
 		return fmt.Errorf("error: failed to batch insert: %w", err)
 	}
-	log.Println("Matches inserted into db:", len(avgMatchStats))
+	log.Println("Matches analyzed and saved:", len(avgMatchStats))
 
 	return nil
 }

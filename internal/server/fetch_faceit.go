@@ -34,8 +34,8 @@ type PlayerDetails struct {
 const topPlayersURL string = "https://open.faceit.com/data/v4/rankings/games/cs2/regions/"
 const playerDetailsURL string = "https://open.faceit.com/data/v4/players/"
 
-func (s *Server) getTopPlayers(ctx context.Context, client *http.Client, region string, limit int) (*Players, error) {
-	url := getTopPlayersURL(region, limit)
+func (s *Server) getTopPlayers(ctx context.Context, client *http.Client, region string, limit int, offset int) (*Players, error) {
+	url := getTopPlayersURL(region, offset, limit)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -133,12 +133,12 @@ func (s *Server) fetchSinglePlayer(ctx context.Context, playerID string, client 
 	return player, nil
 }
 
-func getTopPlayersURL(region string, limit int) string {
+func getTopPlayersURL(region string, offset int, limit int) string {
 	maxLimit := 50
 	if limit > maxLimit {
-		return fmt.Sprintf("%s%s?offset=0&limit=%d", topPlayersURL, region, maxLimit)
+		return fmt.Sprintf("%s%s?offset=%d&limit=%d", topPlayersURL, region, offset, maxLimit)
 	}
-	return fmt.Sprintf("%s%s?offset=0&limit=%d", topPlayersURL, region, limit)
+	return fmt.Sprintf("%s%s?offset=%d&limit=%d", topPlayersURL, region, offset, limit)
 }
 
 func getPlayerDetailsURL(playerID string) string {
